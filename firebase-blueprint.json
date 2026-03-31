@@ -1,0 +1,36 @@
+{
+  "entities": {
+    "Summary": {
+      "title": "Summary",
+      "description": "A generated summary for a YouTube video",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "The ID of the user who generated the summary"
+        },
+        "url": {
+          "type": "string",
+          "description": "The YouTube URL"
+        },
+        "summary": {
+          "type": "string",
+          "description": "The generated summary text"
+        },
+        "createdAt": {
+          "type": "timestamp",
+          "description": "When the summary was created"
+        }
+      },
+      "required": ["userId", "url", "summary", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/summaries/{summaryId}": {
+      "schema": {
+        "$ref": "Summary"
+      },
+      "description": "Stores all generated summaries"
+    }
+  }
+}
