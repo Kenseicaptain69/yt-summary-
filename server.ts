@@ -25,63 +25,86 @@ app.post('/api/summarize', async (req, res) => {
       return res.status(400).json({ error: 'YouTube URL is required' });
     }
 
-    // 1. Get Transcript
-    let transcriptText = '';
-
-    // Extract clean video ID from any YouTube URL format
+    // Extract clean video ID and build canonical URL
     const videoIdMatch = url.match(/(?:youtube\.com\/(?:[^\/]+\/.+\/|(?:v|e(?:mbed)?)\/|.*[?&]v=)|youtu\.be\/)([^"&?\/\s]{11})/i);
     const videoId = videoIdMatch?.[1] || url.trim();
+    const canonicalUrl = `https://www.youtube.com/watch?v=${videoId}`;
 
-    try {
-      const transcript = await YoutubeTranscript.fetchTranscript(videoId);
-      transcriptText = transcript.map((t: any) => t.text).join(' ');
-    } catch (error: any) {
-      console.error('Error fetching transcript:', error?.message || error);
-
-      // Retry once with the full URL if video ID didn't work
-      try {
-        const transcript = await YoutubeTranscript.fetchTranscript(url);
-        transcriptText = transcript.map((t: any) => t.text).join(' ');
-      } catch (retryError: any) {
-        console.error('Retry also failed:', retryError?.message || retryError);
-        return res.status(400).json({
-          error: 'Could not fetch transcript for this video. It might not have closed captions, or YouTube may be blocking requests from this server.'
-        });
-      }
-    }
-
-    if (!transcriptText) {
-      return res.status(400).json({ error: 'Transcript is empty.' });
-    }
-
-    // 2. Summarize — try Gemini first, fall back to local extractive summarizer
     let summary = '';
+    let transcript = '';
 
+    // === APPROACH 1: Use Gemini to directly summarize the YouTube video ===
+    // Gemini can natively access YouTube videos — no transcript scraping needed
     if (process.env.GEMINI_API_KEY) {
-      const prompt = `Summarize the following YouTube video transcript in a clear, concise paragraph:\n\n${transcriptText}`;
       const models = ['gemini-2.0-flash-lite', 'gemini-1.5-flash', 'gemini-2.0-flash'];
 
       for (const model of models) {
         try {
-          const response = await ai.models.generateContent({ model, contents: prompt });
+          const response = await ai.models.generateContent({
+            model,
+            contents: [
+              {
+                role: 'user',
+                parts: [
+                  { text: 'Summarize this YouTube video in a clear, concise paragraph. Only return the summary, nothing else.' },
+                  { fileData: { fileUri: canonicalUrl, mimeType: 'video/mp4' } }
+                ]
+              }
+            ]
+          });
           summary = response.text || '';
-          if (summary) break;
+          if (summary) {
+            console.log(`Gemini (${model}) summarized video directly`);
+            break;
+          }
         } catch (err: any) {
-          console.warn(`Model ${model} failed: ${err.message?.substring(0, 80)}`);
+          console.warn(`Gemini direct (${model}): ${err.message?.substring(0, 100)}`);
         }
       }
     }
 
-    // Fallback: local extractive summarizer (no API needed)
+    // === APPROACH 2: Fetch transcript + Gemini text summarization ===
     if (!summary) {
-      console.log('Using local extractive summarizer (Gemini quota exhausted or key missing)');
-      summary = extractiveSummarize(transcriptText);
+      try {
+        const items = await YoutubeTranscript.fetchTranscript(videoId);
+        transcript = items.map((t: any) => t.text).join(' ');
+      } catch {
+        try {
+          const items = await YoutubeTranscript.fetchTranscript(url);
+          transcript = items.map((t: any) => t.text).join(' ');
+        } catch {
+          console.warn('youtube-transcript failed for both videoId and URL');
+        }
+      }
+
+      if (transcript && process.env.GEMINI_API_KEY) {
+        const prompt = `Summarize the following YouTube video transcript in a clear, concise paragraph:\n\n${transcript}`;
+        const models = ['gemini-2.0-flash-lite', 'gemini-1.5-flash', 'gemini-2.0-flash'];
+        for (const model of models) {
+          try {
+            const response = await ai.models.generateContent({ model, contents: prompt });
+            summary = response.text || '';
+            if (summary) break;
+          } catch (err: any) {
+            console.warn(`Gemini text (${model}): ${err.message?.substring(0, 80)}`);
+          }
+        }
+      }
     }
 
-    res.json({
-      transcript: transcriptText,
-      summary: summary
-    });
+    // === APPROACH 3: Local extractive summarizer (no API needed) ===
+    if (!summary && transcript) {
+      console.log('Using local extractive summarizer');
+      summary = extractiveSummarize(transcript);
+    }
+
+    if (!summary) {
+      return res.status(400).json({
+        error: 'Could not summarize this video. Please check if the URL is valid and try again later.'
+      });
+    }
+
+    res.json({ transcript: transcript || '(processed directly by AI)', summary });
 
   } catch (error: any) {
     console.error('Summarization error:', error);

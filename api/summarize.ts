@@ -1,11 +1,5 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 
-// youtube-transcript ESM workaround
-async function getTranscript(url: string) {
-  const { YoutubeTranscript } = await import('youtube-transcript/dist/youtube-transcript.esm.js');
-  return YoutubeTranscript.fetchTranscript(url);
-}
-
 // Local extractive summarizer (no API needed)
 function extractiveSummarize(text: string, maxSentences = 5): string {
   const sentences = text
@@ -38,7 +32,6 @@ function extractiveSummarize(text: string, maxSentences = 5): string {
 }
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
-  // CORS
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -50,56 +43,90 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const { url } = req.body;
     if (!url) return res.status(400).json({ error: 'YouTube URL is required' });
 
-    // 1. Get transcript — extract clean video ID first
-    let transcriptText = '';
+    // Extract video ID
     const videoIdMatch = url.match(/(?:youtube\.com\/(?:[^\/]+\/.+\/|(?:v|e(?:mbed)?)\/|.*[?&]v=)|youtu\.be\/)([^"&?\/\s]{11})/i);
     const videoId = videoIdMatch?.[1] || url.trim();
+    const canonicalUrl = `https://www.youtube.com/watch?v=${videoId}`;
 
-    try {
-      const transcript = await getTranscript(videoId);
-      transcriptText = (transcript as any[]).map(t => t.text).join(' ');
-    } catch (error) {
-      // Retry with full URL
-      try {
-        const transcript = await getTranscript(url);
-        transcriptText = (transcript as any[]).map(t => t.text).join(' ');
-      } catch (retryError) {
-        return res.status(400).json({ error: 'Could not fetch transcript. The video may not have captions, or YouTube may be blocking requests from this server.' });
-      }
-    }
-
-    if (!transcriptText) {
-      return res.status(400).json({ error: 'Transcript is empty.' });
-    }
-
-    // 2. Try Gemini, fall back to local summarizer
     let summary = '';
+    let transcript = '';
 
+    // === APPROACH 1: Gemini direct YouTube video summarization ===
     if (process.env.GEMINI_API_KEY) {
       const { GoogleGenAI } = await import('@google/genai');
       const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-      const prompt = `Summarize the following YouTube video transcript in a clear, concise paragraph:\n\n${transcriptText}`;
       const models = ['gemini-2.0-flash-lite', 'gemini-1.5-flash', 'gemini-2.0-flash'];
 
       for (const model of models) {
         try {
-          const response = await ai.models.generateContent({ model, contents: prompt });
+          const response = await ai.models.generateContent({
+            model,
+            contents: [
+              {
+                role: 'user',
+                parts: [
+                  { text: 'Summarize this YouTube video in a clear, concise paragraph. Only return the summary, nothing else.' },
+                  { fileData: { fileUri: canonicalUrl, mimeType: 'video/mp4' } }
+                ]
+              }
+            ]
+          });
           summary = response.text || '';
           if (summary) break;
         } catch (err: any) {
-          console.warn(`Model ${model} failed: ${err.message?.substring(0, 80)}`);
+          console.warn(`Gemini direct (${model}): ${err.message?.substring(0, 100)}`);
+        }
+      }
+
+      // === APPROACH 2: Transcript + Gemini text ===
+      if (!summary) {
+        try {
+          const { YoutubeTranscript } = await import('youtube-transcript/dist/youtube-transcript.esm.js');
+          try {
+            const items = await YoutubeTranscript.fetchTranscript(videoId);
+            transcript = items.map((t: any) => t.text).join(' ');
+          } catch {
+            const items = await YoutubeTranscript.fetchTranscript(url);
+            transcript = items.map((t: any) => t.text).join(' ');
+          }
+        } catch {
+          console.warn('transcript fetch failed');
+        }
+
+        if (transcript) {
+          const prompt = `Summarize the following YouTube video transcript in a clear, concise paragraph:\n\n${transcript}`;
+          for (const model of models) {
+            try {
+              const response = await ai.models.generateContent({ model, contents: prompt });
+              summary = response.text || '';
+              if (summary) break;
+            } catch {}
+          }
         }
       }
     }
 
-    // Fallback
+    // === APPROACH 3: Transcript + local extractive ===
     if (!summary) {
-      summary = extractiveSummarize(transcriptText);
+      if (!transcript) {
+        try {
+          const { YoutubeTranscript } = await import('youtube-transcript/dist/youtube-transcript.esm.js');
+          const items = await YoutubeTranscript.fetchTranscript(videoId);
+          transcript = items.map((t: any) => t.text).join(' ');
+        } catch {}
+      }
+      if (transcript) {
+        summary = extractiveSummarize(transcript);
+      }
     }
 
-    return res.status(200).json({ transcript: transcriptText, summary });
+    if (!summary) {
+      return res.status(400).json({ error: 'Could not summarize this video. Please check the URL and try again later.' });
+    }
+
+    return res.status(200).json({ transcript: transcript || '(processed directly by AI)', summary });
   } catch (error: any) {
-    console.error('Summarization error:', error);
+    console.error('Error:', error);
     return res.status(500).json({ error: error.message || 'An error occurred' });
   }
 }
