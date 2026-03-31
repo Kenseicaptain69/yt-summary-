@@ -27,12 +27,27 @@ app.post('/api/summarize', async (req, res) => {
 
     // 1. Get Transcript
     let transcriptText = '';
+
+    // Extract clean video ID from any YouTube URL format
+    const videoIdMatch = url.match(/(?:youtube\.com\/(?:[^\/]+\/.+\/|(?:v|e(?:mbed)?)\/|.*[?&]v=)|youtu\.be\/)([^"&?\/\s]{11})/i);
+    const videoId = videoIdMatch?.[1] || url.trim();
+
     try {
-      const transcript = await YoutubeTranscript.fetchTranscript(url);
+      const transcript = await YoutubeTranscript.fetchTranscript(videoId);
       transcriptText = transcript.map((t: any) => t.text).join(' ');
-    } catch (error) {
-      console.error('Error fetching transcript:', error);
-      return res.status(400).json({ error: 'Could not fetch transcript for this video. It might not have closed captions.' });
+    } catch (error: any) {
+      console.error('Error fetching transcript:', error?.message || error);
+
+      // Retry once with the full URL if video ID didn't work
+      try {
+        const transcript = await YoutubeTranscript.fetchTranscript(url);
+        transcriptText = transcript.map((t: any) => t.text).join(' ');
+      } catch (retryError: any) {
+        console.error('Retry also failed:', retryError?.message || retryError);
+        return res.status(400).json({
+          error: 'Could not fetch transcript for this video. It might not have closed captions, or YouTube may be blocking requests from this server.'
+        });
+      }
     }
 
     if (!transcriptText) {

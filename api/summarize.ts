@@ -50,13 +50,22 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const { url } = req.body;
     if (!url) return res.status(400).json({ error: 'YouTube URL is required' });
 
-    // 1. Get transcript
+    // 1. Get transcript — extract clean video ID first
     let transcriptText = '';
+    const videoIdMatch = url.match(/(?:youtube\.com\/(?:[^\/]+\/.+\/|(?:v|e(?:mbed)?)\/|.*[?&]v=)|youtu\.be\/)([^"&?\/\s]{11})/i);
+    const videoId = videoIdMatch?.[1] || url.trim();
+
     try {
-      const transcript = await getTranscript(url);
+      const transcript = await getTranscript(videoId);
       transcriptText = (transcript as any[]).map(t => t.text).join(' ');
     } catch (error) {
-      return res.status(400).json({ error: 'Could not fetch transcript. The video may not have captions.' });
+      // Retry with full URL
+      try {
+        const transcript = await getTranscript(url);
+        transcriptText = (transcript as any[]).map(t => t.text).join(' ');
+      } catch (retryError) {
+        return res.status(400).json({ error: 'Could not fetch transcript. The video may not have captions, or YouTube may be blocking requests from this server.' });
+      }
     }
 
     if (!transcriptText) {
