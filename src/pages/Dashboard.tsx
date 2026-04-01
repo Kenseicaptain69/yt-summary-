@@ -43,7 +43,7 @@ export default function Dashboard() {
 
     try {
       // Use Render backend URL in production, fallback to same-origin /api/summarize for local dev
-      const backendBase = import.meta.env.https://yt-summary-jwnb.onrender.com || window.location.origin;
+      const backendBase = import.meta.env.VITE_BACKEND_URL || window.location.origin;
       const apiUrl = `${backendBase}/summarize`;
       const response = await fetch(apiUrl, {
         method: 'POST',
@@ -100,14 +100,14 @@ export default function Dashboard() {
 
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-12">
         <div className="grid lg:grid-cols-3 gap-8">
-          
+
           {/* Main Content Area */}
           <div className="lg:col-span-2 space-y-8">
             {/* Input Section */}
             <div className="bg-white p-6 sm:p-8 rounded-3xl shadow-sm border border-zinc-100">
               <h2 className="text-2xl font-bold mb-2">Summarize a Video</h2>
               <p className="text-zinc-500 mb-6">Paste a YouTube URL below to get an AI-generated summary.</p>
-              
+
               <form onSubmit={handleSummarize} className="space-y-4">
                 <div className="relative">
                   <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
@@ -122,7 +122,7 @@ export default function Dashboard() {
                     className="block w-full pl-11 pr-4 py-4 border border-zinc-200 rounded-2xl focus:ring-red-500 focus:border-red-500 bg-zinc-50 text-lg transition-colors"
                   />
                 </div>
-                
+
                 {error && (
                   <div className="bg-red-50 border border-red-200 text-red-600 px-4 py-3 rounded-xl flex items-center gap-2 text-sm">
                     <AlertCircle className="w-4 h-4" />
@@ -179,7 +179,7 @@ export default function Dashboard() {
                 <Clock className="w-5 h-5 text-zinc-400" />
                 <h3 className="text-lg font-bold">Recent Summaries</h3>
               </div>
-              
+
               <div className="space-y-4 max-h-[calc(100vh-200px)] overflow-y-auto pr-2">
                 {history.length === 0 ? (
                   <p className="text-sm text-zinc-500 text-center py-8">No summaries yet.</p>
