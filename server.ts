@@ -80,38 +80,10 @@ app.post('/api/summarize', async (req, res) => {
     let transcript = '';
 
     // === APPROACH 1: Use Gemini to directly summarize the YouTube video ===
-    // Gemini can natively access YouTube videos — no transcript scraping needed
+    // Note: Gemini video support requires uploaded video files, not YouTube URLs
+    // Skip this approach - use transcript-based summarization instead
     if (process.env.GEMINI_API_KEY) {
-      const models = ['gemini-2.0-flash-lite', 'gemini-1.5-flash', 'gemini-2.0-flash'];
-
-      for (const model of models) {
-        try {
-          const response = await ai.models.generateContent({
-            model,
-            contents: [
-              {
-                role: 'user',
-                parts: [
-                  { text: 'Summarize this YouTube video in a clear, concise paragraph. Only return the summary, nothing else.' },
-                  { fileData: { fileUri: canonicalUrl, mimeType: 'video/mp4' } }
-                ]
-              }
-            ]
-          });
-          summary = response.text || '';
-          if (summary) {
-            console.log(`Gemini (${model}) summarized video directly`);
-            break;
-          }
-        } catch (err: any) {
-          const msg = err.message || '';
-          if (msg.includes('does not support image input') || msg.includes('image')) {
-            console.warn(`Gemini direct (${model}): model doesn't support video, trying next...`);
-            continue;
-          }
-          console.warn(`Gemini direct (${model}): ${msg.substring(0, 100)}`);
-        }
-      }
+      console.log('Using transcript-based summarization');
     }
 
     // === APPROACH 2: Fetch transcript + Gemini text summarization ===
