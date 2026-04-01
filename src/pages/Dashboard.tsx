@@ -44,7 +44,7 @@ export default function Dashboard() {
     try {
       // Use Render backend URL in production, fallback to same-origin /api/summarize for local dev
       // const backendBase = import.meta.env.VITE_BACKEND_URL || window.location.origin;
-      const apiUrl = `${import.meta.env.VITE_API_URL}/api/summarize`;
+      const apiUrl = `${import.meta.env.VITE_BACKEND_URL}/api/summarize`;
       const response = await fetch(apiUrl, {
         method: 'POST',
         headers: {
