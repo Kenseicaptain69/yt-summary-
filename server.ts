@@ -87,20 +87,27 @@ app.post('/api/summarize', async (req, res) => {
     }
 
     // === APPROACH 2: Fetch transcript + Gemini text summarization ===
+    if (process.env.GEMINI_API_KEY) {
+      console.log('Fetching transcript...');
+    }
+    
     if (!summary) {
       try {
         const items = await YoutubeTranscript.fetchTranscript(videoId);
         transcript = items.map((t: any) => t.text).join(' ');
-      } catch {
+        console.log(`Transcript fetched, length: ${transcript.length} chars`);
+      } catch (e: any) {
+        console.warn(`Transcript fetch failed for videoId: ${e.message}`);
         try {
           const items = await YoutubeTranscript.fetchTranscript(url);
           transcript = items.map((t: any) => t.text).join(' ');
-        } catch {
-          console.warn('youtube-transcript failed for both videoId and URL');
+        } catch (e2: any) {
+          console.warn(`Transcript fetch failed for URL: ${e2.message}`);
         }
       }
+    }
 
-      if (transcript && process.env.GEMINI_API_KEY) {
+    if (transcript && process.env.GEMINI_API_KEY) {
         const prompt = `Summarize the following YouTube video transcript in a clear, concise paragraph:\n\n${transcript}`;
         const models = ['gemini-2.0-flash-lite', 'gemini-1.5-flash', 'gemini-2.0-flash'];
         for (const model of models) {
@@ -110,12 +117,11 @@ app.post('/api/summarize', async (req, res) => {
             if (summary) break;
           } catch (err: any) {
             console.warn(`Gemini text (${model}): ${err.message?.substring(0, 80)}`);
-          }
         }
       }
     }
 
-    // === APPROACH 3: Local extractive summarizer (no API needed) ===
+    // === APPROACH 3: Local extractive summarizer ===
     if (!summary && transcript) {
       console.log('Using local extractive summarizer');
       summary = extractiveSummarize(transcript);
@@ -131,6 +137,10 @@ app.post('/api/summarize', async (req, res) => {
 
   } catch (error: any) {
     console.error('Summarization error:', error);
+    const errMsg = error.message || '';
+    if (errMsg.includes('image.png') || errMsg.includes('does not support image')) {
+      return res.status(400).json({ error: 'Video summarization failed. The video may not support transcript-based summarization.' });
+    }
     res.status(500).json({ error: error.message || 'An error occurred during summarization' });
   }
 });
