@@ -104,7 +104,12 @@ app.post('/api/summarize', async (req, res) => {
             break;
           }
         } catch (err: any) {
-          console.warn(`Gemini direct (${model}): ${err.message?.substring(0, 100)}`);
+          const msg = err.message || '';
+          if (msg.includes('does not support image input') || msg.includes('image')) {
+            console.warn(`Gemini direct (${model}): model doesn't support video, trying next...`);
+            continue;
+          }
+          console.warn(`Gemini direct (${model}): ${msg.substring(0, 100)}`);
         }
       }
     }
