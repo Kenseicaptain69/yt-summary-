@@ -13,6 +13,52 @@ const PORT = 3000;
 
 app.use(cors());
 app.use(express.json());
+app.use((req, res, next) => {
+  console.log(`${new Date().toISOString()} ${req.method} ${req.path}`);
+  next();
+});
+
+app.get('/api/health', (req, res) => {
+  res.json({ status: 'ok', timestamp: new Date().toISOString(), uptime: process.uptime() });
+});
+
+const requestCounts = new Map<string, { count: number, resetAt: number }>();
+const RATE_LIMIT = 10;
+const RATE_WINDOW_MS = 60 * 1000;
+
+function checkRateLimit(ip: string): boolean {
+  const now = Date.now();
+  const record = requestCounts.get(ip);
+  
+  if (!record || now > record.resetAt) {
+    requestCounts.set(ip, { count: 1, resetAt: now + RATE_WINDOW_MS });
+    return true;
+  }
+  
+  if (record.count >= RATE_LIMIT) {
+    return false;
+  }
+  
+  record.count++;
+  return true;
+}
+
+app.use('/api/', (req, res, next) => {
+  const ip = req.ip || req.socket.remoteAddress || 'unknown';
+  if (!checkRateLimit(ip)) {
+    return res.status(429).json({ error: 'Too many requests. Please try again later.' });
+  }
+  next();
+});
+
+app.get('/api/video/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    res.json({ videoId: id, message: 'Video metadata endpoint - add Gemini integration for full metadata' });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
 
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || '' });
 
@@ -104,7 +150,7 @@ app.post('/api/summarize', async (req, res) => {
       });
     }
 
-    res.json({ transcript: transcript || '(processed directly by AI)', summary });
+    res.json({ transcript: transcript || '(processed directly by AI)', summary, timestamp: new Date().toISOString() });
 
   } catch (error: any) {
     console.error('Summarization error:', error);
