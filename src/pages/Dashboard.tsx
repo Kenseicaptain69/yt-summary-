@@ -42,7 +42,9 @@ export default function Dashboard() {
     setCurrentSummary('');
 
     try {
-      const apiUrl = `${window.location.origin}/api/summarize`;
+      // Use Render backend URL in production, fallback to same-origin /api/summarize for local dev
+      const backendBase = import.meta.env.https://yt-summary-jwnb.onrender.com || window.location.origin;
+      const apiUrl = `${backendBase}/summarize`;
       const response = await fetch(apiUrl, {
         method: 'POST',
         headers: {
