@@ -2,7 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import { createServer as createViteServer } from 'vite';
 import path from 'path';
-import { YoutubeTranscript } from 'youtube-transcript/dist/youtube-transcript.esm.js';
+import { Innertube } from 'youtubei.js';
 import { GoogleGenAI } from '@google/genai';
 import dotenv from 'dotenv';
 
@@ -86,24 +86,41 @@ app.post('/api/summarize', async (req, res) => {
       console.log('Using transcript-based summarization');
     }
 
-    // === APPROACH 2: Fetch transcript + Gemini text summarization ===
+    // === APPROACH 2: Fetch transcript via Supadata API ===
     if (process.env.GEMINI_API_KEY) {
-      console.log('Fetching transcript...');
+      console.log('Fetching transcript via Supadata API...');
     }
     
-    if (!summary) {
+    if (!summary && process.env.SUPADATA_API_KEY) {
       try {
-        const items = await YoutubeTranscript.fetchTranscript(videoId);
-        transcript = items.map((t: any) => t.text).join(' ');
-        console.log(`Transcript fetched, length: ${transcript.length} chars`);
-      } catch (e: any) {
-        console.warn(`Transcript fetch failed for videoId: ${e.message}`);
-        try {
-          const items = await YoutubeTranscript.fetchTranscript(url);
-          transcript = items.map((t: any) => t.text).join(' ');
-        } catch (e2: any) {
-          console.warn(`Transcript fetch failed for URL: ${e2.message}`);
+        const transcriptRes = await fetch(
+          `https://api.supadata.ai/v1/youtube/transcript?videoId=${videoId}`,
+          {
+            headers: { 
+              "x-api-key": process.env.SUPADATA_API_KEY,
+              "Content-Type": "application/json"
+            }
+          }
+        );
+        const transcriptData = await transcriptRes.json();
+        if (transcriptData.content) {
+          transcript = transcriptData.content.map((c: any) => c.text).join(' ');
+          console.log(`Supadata transcript fetched, length: ${transcript.length} chars`);
         }
+      } catch (e: any) {
+        console.warn(`Supadata fetch failed: ${e.message}`);
+      }
+    }
+
+    // Fallback: try youtubei.js
+    if (!transcript && !summary) {
+      try {
+        const youtube = await Innertube.create();
+        const info = await youtube.getBasicInfo(videoId);
+        console.log(`youtubei.js: got basic info, has captions: ${!!info.captions}`);
+        // Note: Full transcript requires getTranscript() which needs proper setup
+      } catch (e: any) {
+        console.warn(`youtubei.js failed: ${e.message}`);
       }
     }
 
