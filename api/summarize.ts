@@ -12,7 +12,7 @@ function extractiveSummarize(text: string, maxSentences = 5): string {
 
   const wordFreq: Record<string, number> = {};
   const words = text.toLowerCase().replace(/[^a-z\s]/g, '').split(/\s+/);
-  const stopWords = new Set(['the','a','an','is','are','was','were','be','been','being','have','has','had','do','does','did','will','would','could','should','may','might','shall','can','it','its','this','that','these','those','i','you','he','she','we','they','me','him','her','us','them','my','your','his','our','their','and','but','or','so','if','then','than','to','of','in','for','on','with','at','by','from','as','into','about','not','no','up','out','just','also','very','much','more','most','all','any','each','every','some','such','only']);
+  const stopWords = new Set(['the', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'been', 'being', 'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could', 'should', 'may', 'might', 'shall', 'can', 'it', 'its', 'this', 'that', 'these', 'those', 'i', 'you', 'he', 'she', 'we', 'they', 'me', 'him', 'her', 'us', 'them', 'my', 'your', 'his', 'our', 'their', 'and', 'but', 'or', 'so', 'if', 'then', 'than', 'to', 'of', 'in', 'for', 'on', 'with', 'at', 'by', 'from', 'as', 'into', 'about', 'not', 'no', 'up', 'out', 'just', 'also', 'very', 'much', 'more', 'most', 'all', 'any', 'each', 'every', 'some', 'such', 'only']);
 
   for (const w of words) {
     if (w.length > 2 && !stopWords.has(w)) {
@@ -100,7 +100,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
               const response = await ai.models.generateContent({ model, contents: prompt });
               summary = response.text || '';
               if (summary) break;
-            } catch {}
+            } catch { }
           }
         }
       }
@@ -113,7 +113,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           const { YoutubeTranscript } = await import('youtube-transcript/dist/youtube-transcript.esm.js');
           const items = await YoutubeTranscript.fetchTranscript(videoId);
           transcript = items.map((t: any) => t.text).join(' ');
-        } catch {}
+        } catch { }
       }
       if (transcript) {
         summary = extractiveSummarize(transcript);

@@ -3,6 +3,9 @@
   "outputDirectory": "dist",
   "framework": "vite",
   "rewrites": [
-    { "source": "/api/summarize", "destination": "/api/summarize" }
+    {
+      "source": "/api/summarize",
+      "destination": "/api/summarize"
+    }
   ]
 }
