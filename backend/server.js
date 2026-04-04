@@ -3,16 +3,10 @@ import cors from "cors";
 import dotenv from "dotenv";
 import { GoogleGenAI } from "@google/genai";
 
-// In local dev, load from ../.env; on Render, env vars are injected by the platform
-dotenv.config(); // or just remove it entirely — Render injects vars automatically
-
-// youtube-transcript has a broken "main" vs "type":"module" config,
-// so we import the ESM bundle directly via dynamic import
-const { YoutubeTranscript } = await import("youtube-transcript/dist/youtube-transcript.esm.js");
+dotenv.config();
 
 const app = express();
 
-// Allow requests from any origin (required for Vercel frontend → Render backend)
 app.use(cors({
   origin: "*",
   methods: ["GET", "POST", "OPTIONS"],
@@ -20,28 +14,56 @@ app.use(cors({
 }));
 app.use(express.json());
 
-// Health check endpoint — Render pings this to keep the service warm
+// Health check
 app.get("/", (req, res) => {
   res.json({ status: "ok", message: "SummifyYT backend is running" });
 });
 
-// POST /summarize  — body: { url: "https://youtube.com/watch?v=..." }
+// Helper: extract video ID from any YouTube URL format
+function extractVideoId(url) {
+  const match = url.match(/(?:v=|youtu\.be\/|embed\/|shorts\/)([^&?/\s]{11})/);
+  return match ? match[1] : null;
+}
+
+// POST /summarize — body: { url: "https://youtube.com/watch?v=..." }
 app.post("/summarize", async (req, res) => {
   try {
     const { url } = req.body;
     if (!url) return res.status(400).json({ error: "url is required" });
 
     if (!process.env.GEMINI_API_KEY) {
-      return res.status(500).json({ error: "GEMINI_API_KEY is not configured on the server" });
+      return res.status(500).json({ error: "GEMINI_API_KEY is not configured" });
     }
 
-    const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+    if (!process.env.SUPADATA_API_KEY) {
+      return res.status(500).json({ error: "SUPADATA_API_KEY is not configured" });
+    }
 
-    // 1. Grab transcript
+    const videoId = extractVideoId(url);
+    if (!videoId) {
+      return res.status(400).json({ error: "Invalid YouTube URL" });
+    }
+
+    // 1. Fetch transcript via Supadata (works from any server IP)
     let transcript = "";
     try {
-      const items = await YoutubeTranscript.fetchTranscript(url);
-      transcript = items.map((i) => i.text).join(" ");
+      const transcriptRes = await fetch(
+        `https://api.supadata.ai/v1/youtube/transcript?videoId=${videoId}&text=true`,
+        {
+          headers: {
+            "x-api-key": process.env.SUPADATA_API_KEY,
+          },
+        }
+      );
+
+      if (transcriptRes.ok) {
+        const transcriptData = await transcriptRes.json();
+        // Supadata returns { content: "full transcript text" } when text=true
+        transcript = transcriptData.content || "";
+      } else {
+        const errData = await transcriptRes.json();
+        console.warn("Supadata error:", errData);
+      }
     } catch (transcriptErr) {
       console.warn("Transcript fetch failed:", transcriptErr.message);
     }
@@ -53,6 +75,7 @@ app.post("/summarize", async (req, res) => {
     }
 
     // 2. Summarize with Gemini
+    const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
     const prompt = `Summarize the following YouTube video transcript in a clear, concise paragraph:\n\n${transcript}`;
     const response = await ai.models.generateContent({
       model: "gemini-2.0-flash",
