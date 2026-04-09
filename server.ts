@@ -2,7 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import { createServer as createViteServer } from 'vite';
 import path from 'path';
-import { Innertube } from 'youtubei.js';
+import crypto from 'crypto';
 import { GoogleGenAI } from '@google/genai';
 import dotenv from 'dotenv';
 
@@ -18,8 +18,43 @@ app.use((req, res, next) => {
   next();
 });
 
+interface CacheEntry {
+  data: any;
+  expiry: number;
+}
+
+const transcriptCache = new Map<string, CacheEntry>();
+const SUMMARY_CACHE_TTL = 1000 * 60 * 60;
+const SUMMARY_CACHE_MAX = 100;
+
+function generateCacheKey(input: string): string {
+  return crypto.createHash('md5').update(input).digest('hex');
+}
+
+function cacheGet(key: string): any | null {
+  const entry = transcriptCache.get(key);
+  if (entry && entry.expiry > Date.now()) {
+    return entry.data;
+  }
+  transcriptCache.delete(key);
+  return null;
+}
+
+function cacheSet(key: string, data: any): void {
+  if (transcriptCache.size >= SUMMARY_CACHE_MAX) {
+    const oldestKey = transcriptCache.keys().next().value;
+    if (oldestKey) transcriptCache.delete(oldestKey);
+  }
+  transcriptCache.set(key, { data, expiry: Date.now() + SUMMARY_CACHE_TTL });
+}
+
 app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString(), uptime: process.uptime() });
+  res.json({ 
+    status: 'ok', 
+    timestamp: new Date().toISOString(), 
+    uptime: process.uptime(),
+    cache: { size: transcriptCache.size }
+  });
 });
 
 const requestCounts = new Map<string, { count: number, resetAt: number }>();
@@ -51,47 +86,31 @@ app.use('/api/', (req, res, next) => {
   next();
 });
 
-app.get('/api/video/:id', async (req, res) => {
-  try {
-    const { id } = req.params;
-    res.json({ videoId: id, message: 'Video metadata endpoint - add Gemini integration for full metadata' });
-  } catch (error: any) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || '' });
 
-// API Routes
+type SummaryStyle = 'brief' | 'detailed' | 'bullets' | 'timestamped';
+
 app.post('/api/summarize', async (req, res) => {
   try {
-    const { url } = req.body;
+    const { url, style = 'brief', topics } = req.body as { url?: string; style?: SummaryStyle; topics?: string[] };
     
     if (!url) {
       return res.status(400).json({ error: 'YouTube URL is required' });
     }
 
-    // Extract clean video ID and build canonical URL
     const videoIdMatch = url.match(/(?:youtube\.com\/(?:[^\/]+\/.+\/|(?:v|e(?:mbed)?)\/|.*[?&]v=)|youtu\.be\/)([^"&?\/\s]{11})/i);
     const videoId = videoIdMatch?.[1] || url.trim();
-    const canonicalUrl = `https://www.youtube.com/watch?v=${videoId}`;
-
-    let summary = '';
-    let transcript = '';
-
-    // === APPROACH 1: Use Gemini to directly summarize the YouTube video ===
-    // Note: Gemini video support requires uploaded video files, not YouTube URLs
-    // Skip this approach - use transcript-based summarization instead
-    if (process.env.GEMINI_API_KEY) {
-      console.log('Using transcript-based summarization');
-    }
-
-    // === APPROACH 2: Fetch transcript via Supadata API ===
-    if (process.env.GEMINI_API_KEY) {
-      console.log('Fetching transcript via Supadata API...');
-    }
+    const cacheKey = generateCacheKey(`${videoId}:${style}:${topics?.join(',') || ''}`);
     
-    if (!summary && process.env.SUPADATA_API_KEY) {
+    const cached = cacheGet(cacheKey);
+    if (cached) {
+      console.log('Returning cached summary');
+      return res.json({ ...cached, cached: true });
+    }
+
+    // Try Supadata first
+    let transcript = '';
+    if (process.env.SUPADATA_API_KEY) {
       try {
         const transcriptRes = await fetch(
           `https://api.supadata.ai/v1/youtube/transcript?videoId=${videoId}`,
@@ -105,102 +124,247 @@ app.post('/api/summarize', async (req, res) => {
         const transcriptData = await transcriptRes.json();
         if (transcriptData.content) {
           transcript = transcriptData.content.map((c: any) => c.text).join(' ');
-          console.log(`Supadata transcript fetched, length: ${transcript.length} chars`);
+          console.log(`Supadata transcript: ${transcript.length} chars`);
         }
       } catch (e: any) {
         console.warn(`Supadata fetch failed: ${e.message}`);
       }
     }
 
-    // Fallback: try youtubei.js
-    if (!transcript && !summary) {
-      try {
-        const youtube = await Innertube.create();
-        const info = await youtube.getBasicInfo(videoId);
-        console.log(`youtubei.js: got basic info, has captions: ${!!info.captions}`);
-        // Note: Full transcript requires getTranscript() which needs proper setup
-      } catch (e: any) {
-        console.warn(`youtubei.js failed: ${e.message}`);
-      }
-    }
-
-    if (transcript && process.env.GEMINI_API_KEY) {
-        const prompt = `Summarize the following YouTube video transcript in a clear, concise paragraph:\n\n${transcript}`;
-        const models = ['gemini-2.0-flash-lite', 'gemini-1.5-flash', 'gemini-2.0-flash'];
-        for (const model of models) {
-          try {
-            const response = await ai.models.generateContent({ model, contents: prompt });
-            summary = response.text || '';
-            if (summary) break;
-          } catch (err: any) {
-            console.warn(`Gemini text (${model}): ${err.message?.substring(0, 80)}`);
-        }
-      }
-    }
-
-    // === APPROACH 3: Local extractive summarizer ===
-    if (!summary && transcript) {
-      console.log('Using local extractive summarizer');
-      summary = extractiveSummarize(transcript);
-    }
-
-    if (!summary) {
-      return res.status(400).json({
-        error: 'Could not summarize this video. Please check if the URL is valid and try again later.'
+    if (!transcript) {
+      return res.status(400).json({ 
+        error: 'Could not fetch transcript. The video may not have captions available.',
+        videoId,
+        hint: 'Try a different video that has English subtitles.'
       });
     }
 
-    res.json({ transcript: transcript || '(processed directly by AI)', summary, timestamp: new Date().toISOString() });
+    const prompt = buildPrompt(transcript, style, topics);
+    const models = ['gemini-2.0-flash-lite', 'gemini-1.5-flash', 'gemini-2.0-flash'];
+    let summary = '';
+
+    for (const model of models) {
+      try {
+        const response = await ai.models.generateContent({
+          model,
+          contents: prompt,
+          config: {
+            systemInstruction: getSystemPrompt(style),
+            temperature: style === 'brief' ? 0.3 : 0.7,
+            maxOutputTokens: style === 'brief' ? 500 : 2000,
+          }
+        });
+        summary = response.text || '';
+        if (summary) break;
+      } catch (err: any) {
+        console.warn(`Gemini (${model}): ${err.message?.substring(0, 80)}`);
+      }
+    }
+
+    if (!summary) {
+      return res.status(500).json({ error: 'AI summarization failed. Please try again.' });
+    }
+
+    const result = {
+      videoId,
+      summary,
+      style,
+      timestamp: new Date().toISOString(),
+    };
+
+    cacheSet(cacheKey, result);
+    res.json(result);
 
   } catch (error: any) {
     console.error('Summarization error:', error);
-    const errMsg = error.message || '';
-    if (errMsg.includes('image.png') || errMsg.includes('does not support image')) {
-      return res.status(400).json({ error: 'Video summarization failed. The video may not support transcript-based summarization.' });
-    }
-    res.status(500).json({ error: error.message || 'An error occurred during summarization' });
+    res.status(500).json({ error: error.message || 'An error occurred' });
   }
 });
 
-// Simple extractive summarizer — picks the most important sentences
-function extractiveSummarize(text: string, maxSentences = 5): string {
-  // Split into sentences
-  const sentences = text
-    .replace(/\s+/g, ' ')
-    .split(/(?<=[.!?])\s+/)
-    .map(s => s.trim())
-    .filter(s => s.length > 20);
+function buildPrompt(transcript: string, style: SummaryStyle, topics?: string[]): string {
+  const baseStyle = {
+    brief: 'Create a brief, one-paragraph summary (2-3 sentences)',
+    detailed: 'Create a comprehensive summary with all key points covered in detail',
+    bullets: 'List the key points as bullet points with clear headers',
+    timestamped: 'Organize by key moments with approximate timestamps'
+  }[style] || 'Create a brief summary';
 
-  if (sentences.length <= maxSentences) return sentences.join(' ');
+  const topicFilter = topics?.length 
+    ? `\n\nFocus especially on these topics: ${topics.join(', ')}` 
+    : '';
 
-  // Score sentences by word frequency
-  const wordFreq: Record<string, number> = {};
-  const words = text.toLowerCase().replace(/[^a-z\s]/g, '').split(/\s+/);
-  const stopWords = new Set(['the','a','an','is','are','was','were','be','been','being','have','has','had','do','does','did','will','would','could','should','may','might','shall','can','it','its','this','that','these','those','i','you','he','she','we','they','me','him','her','us','them','my','your','his','our','their','and','but','or','so','if','then','than','to','of','in','for','on','with','at','by','from','as','into','about','not','no','up','out','just','also','very','much','more','most','all','any','each','every','some','such','only']);
-
-  for (const w of words) {
-    if (w.length > 2 && !stopWords.has(w)) {
-      wordFreq[w] = (wordFreq[w] || 0) + 1;
-    }
-  }
-
-  // Score each sentence
-  const scored = sentences.map((s, idx) => {
-    const sWords = s.toLowerCase().replace(/[^a-z\s]/g, '').split(/\s+/);
-    const score = sWords.reduce((sum, w) => sum + (wordFreq[w] || 0), 0) / (sWords.length || 1);
-    return { s, score, idx };
-  });
-
-  // Pick top sentences, keep original order
-  const top = scored.sort((a, b) => b.score - a.score).slice(0, maxSentences);
-  top.sort((a, b) => a.idx - b.idx);
-
-  return top.map(t => t.s).join(' ');
+  return `${baseStyle}. Transcript:\n\n${transcript.substring(0, 25000)}${topicFilter}`;
 }
+
+function getSystemPrompt(style: SummaryStyle): string {
+  const prompts = {
+    brief: 'You create concise, engaging video summaries. Keep it to 2-3 sentences highlighting the main insight.',
+    detailed: 'You create comprehensive video summaries. Cover all key points, examples, and nuances from the content.',
+    bullets: 'You create bullet-point summaries. Use clear categories like "Key Takeaways", " actionable Tips", "Important Concepts".',
+    timestamped: 'You identify key moments in videos. Group content by topic with descriptive timestamps.'
+  };
+  return prompts[style] || prompts.brief;
+}
+
+app.post('/api/analyze', async (req, res) => {
+  try {
+    const { url } = req.body as { url?: string };
+    
+    if (!url) {
+      return res.status(400).json({ error: 'YouTube URL is required' });
+    }
+
+    const videoIdMatch = url.match(/(?:youtube\.com\/(?:[^\/]+\/.+\/|(?:v|e(?:mbed)?)\/|.*[?&]v=)|youtu\.be\/)([^"&?\/\s]{11})/i);
+    const videoId = videoIdMatch?.[1];
+
+    if (!videoId) {
+      return res.status(400).json({ error: 'Invalid YouTube URL' });
+    }
+
+    // Fetch transcript for analysis
+    let transcript = '';
+    if (process.env.SUPADATA_API_KEY) {
+      try {
+        const transcriptRes = await fetch(
+          `https://api.supadata.ai/v1/youtube/transcript?videoId=${videoId}`,
+          {
+            headers: { 
+              "x-api-key": process.env.SUPADATA_API_KEY,
+              "Content-Type": "application/json"
+            }
+          }
+        );
+        const transcriptData = await transcriptRes.json();
+        if (transcriptData.content) {
+          transcript = transcriptData.content.map((c: any) => c.text).join(' ');
+        }
+      } catch (e: any) {
+        console.warn(`Supadata fetch failed: ${e.message}`);
+      }
+    }
+
+    if (!transcript) {
+      return res.status(400).json({ error: 'Could not fetch transcript for analysis' });
+    }
+
+    const prompt = `Analyze this video transcript and provide:
+1. **Topics** - Main topics covered (comma-separated)
+2. **Sentiment** - Overall tone (positive/neutral/negative)
+3. **Difficulty** - Beginner/Intermediate/Advanced
+4. **Audience** - Who this is for
+5. **Key Terms** - Important terminology used
+
+Transcript: ${transcript.substring(0, 15000)}`;
+
+    let analysis = '';
+    const models = ['gemini-2.0-flash-lite', 'gemini-1.5-flash'];
+    
+    for (const model of models) {
+      try {
+        const response = await ai.models.generateContent({
+          model,
+          contents: prompt,
+          config: { temperature: 0.3 }
+        });
+        analysis = response.text || '';
+        if (analysis) break;
+      } catch (err: any) {
+        console.warn(`Analysis failed (${model}): ${err.message?.substring(0, 80)}`);
+      }
+    }
+
+    res.json({
+      videoId,
+      analysis: analysis || 'Analysis unavailable',
+      timestamp: new Date().toISOString()
+    });
+
+  } catch (error: any) {
+    console.error('Analysis error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/search', async (req, res) => {
+  try {
+    const { q, videoId } = req.query as { q?: string; videoId?: string };
+    
+    if (!q || !videoId) {
+      return res.status(400).json({ error: 'Query (q) and videoId required' });
+    }
+
+    // Fetch transcript
+    let transcript = '';
+    if (process.env.SUPADATA_API_KEY) {
+      try {
+        const transcriptRes = await fetch(
+          `https://api.supadata.ai/v1/youtube/transcript?videoId=${videoId}`,
+          {
+            headers: { 
+              "x-api-key": process.env.SUPADATA_API_KEY,
+              "Content-Type": "application/json"
+            }
+          }
+        );
+        const transcriptData = await transcriptRes.json();
+        if (transcriptData.content) {
+          transcript = transcriptData.content.map((c: any) => c.text).join(' ');
+        }
+      } catch (e: any) {
+        console.warn(`Supadata fetch failed: ${e.message}`);
+      }
+    }
+
+    if (!transcript) {
+      return res.status(400).json({ error: 'Could not fetch transcript' });
+    }
+
+    // Use AI to find relevant sections
+    const prompt = `Search for "${q}" in this transcript and provide the relevant context around each mention:
+
+Transcript: ${transcript.substring(0, 20000)}`;
+
+    let results = '';
+    const models = ['gemini-2.0-flash-lite', 'gemini-1.5-flash'];
+    
+    for (const model of models) {
+      try {
+        const response = await ai.models.generateContent({
+          model,
+          contents: prompt,
+          config: { temperature: 0.2 }
+        });
+        results = response.text || '';
+        if (results) break;
+      } catch (err: any) {
+        console.warn(`Search failed (${model}): ${err.message?.substring(0, 80)}`);
+      }
+    }
+
+    res.json({
+      videoId,
+      query: q,
+      results: results || 'No results found',
+      timestamp: new Date().toISOString()
+    });
+
+  } catch (error: any) {
+    console.error('Search error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/cache/clear', (req, res) => {
+  transcriptCache.clear();
+  res.json({ message: 'Cache cleared', size: 0 });
+});
+
+app.get('/api/cache', (req, res) => {
+  res.json({ size: transcriptCache.size, entries: Array.from(transcriptCache.keys()) });
+});
 
 async function startServer() {
   try {
-    // Vite middleware for development
     if (process.env.NODE_ENV !== 'production') {
       const vite = await createViteServer({
         server: { middlewareMode: true },
@@ -216,7 +380,12 @@ async function startServer() {
     }
 
     app.listen(PORT, '0.0.0.0', () => {
-      console.log(`Server running on http://localhost:${PORT}`);
+      console.log(`🚀 Server running on http://localhost:${PORT}`);
+      console.log(`📌 Endpoints:`);
+      console.log(`   POST /api/summarize - Summarize video (url, style, topics)`);
+      console.log(`   POST /api/analyze  - Analyze video content`);
+      console.log(`   GET  /api/search  - Search in video (q, videoId)`);
+      console.log(`   GET  /api/health  - Health check`);
     });
   } catch (error) {
     console.error('Failed to start server:', error);
