@@ -183,18 +183,25 @@ app.use('/api/', (req, res, next) => {
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || '' });
 
 type SummaryStyle = 'brief' | 'detailed' | 'bullets' | 'timestamped' | 'question' | 'actionable';
+type SummaryLength = 'short' | 'medium' | 'detailed';
 type Language = 'en' | 'es' | 'fr' | 'de' | 'pt' | 'ja' | 'ko' | 'zh';
 type Model = 'gemini-2.0-flash-lite' | 'gemini-1.5-flash' | 'gemini-2.0-flash' | 'gemini-2.5-pro';
 
 const MODELS: Model[] = ['gemini-2.0-flash-lite', 'gemini-1.5-flash', 'gemini-2.0-flash'];
 
+const LENGTH_CONFIGS = {
+  short: { multiplier: 0.5 },
+  medium: { multiplier: 1.0 },
+  detailed: { multiplier: 1.5 },
+};
+
 const STYLE_CONFIGS = {
   brief: { temperature: 0.3, maxTokens: 500, system: 'Create concise, engaging summaries in 2-3 sentences.' },
   detailed: { temperature: 0.7, maxTokens: 2000, system: 'Create comprehensive summaries covering all key points with examples.' },
-  bullets: { temperature: 0.5, maxTokens: 1500, system: 'Use clear categories: Key Takeaways, Action Items, Important Concepts.' },
-  timestamped: { temperature: 0.5, maxTokens: 2000, system: 'Organize by key moments with descriptive timestamps.' },
+  bullets: { temperature: 0.5, maxTokens: 1500, system: 'Use clear categories: Key Takeaways, Important Concepts, Action Items. Start each point with •' },
+  timestamped: { temperature: 0.5, maxTokens: 2000, system: 'Organize by key moments with timestamps in [MM:SS] format.' },
   question: { temperature: 0.3, maxTokens: 1000, system: 'Format as Q&A based on the content.' },
-  actionable: { temperature: 0.6, maxTokens: 1200, system: 'Focus on actionable insights and practical steps.' },
+  actionable: { temperature: 0.6, maxTokens: 1200, system: 'Focus on actionable insights and practical steps users can take.' },
 };
 
 const LANGUAGE_PROMPTS: Record<Language, string> = {
@@ -212,7 +219,8 @@ app.post('/api/summarize', async (req, res) => {
   try {
     const { 
       url, 
-      style = 'brief', 
+      style = 'brief',
+      length = 'medium',
       topics,
       language = 'en',
       model,
@@ -221,6 +229,7 @@ app.post('/api/summarize', async (req, res) => {
     } = req.body as {
       url?: string;
       style?: SummaryStyle;
+      length?: SummaryLength;
       topics?: string[];
       language?: Language;
       model?: Model;
@@ -235,7 +244,7 @@ app.post('/api/summarize', async (req, res) => {
 
     const videoIdMatch = url.match(/(?:youtube\.com\/(?:[^\/]+\/.+\/|(?:v|e(?:mbed)?)\/|.*[?&]v=)|youtu\.be\/)([^"&?\/\s]{11})/i);
     const videoId = videoIdMatch?.[1] || url.trim();
-    const cacheKey = generateCacheKey(`${videoId}:${style}:${language}:${topics?.join(',') || ''}`);
+    const cacheKey = generateCacheKey(`${videoId}:${style}:${length}:${language}:${topics?.join(',') || ''}`);
     
     const cached = cacheGet(cacheKey);
     if (cached) {
@@ -291,10 +300,13 @@ app.post('/api/summarize', async (req, res) => {
     usageStats.byModel.set(selectedModel, (usageStats.byModel.get(selectedModel) || 0) + 1);
     
     const config = STYLE_CONFIGS[style] || STYLE_CONFIGS.brief;
+    const lengthConfig = LENGTH_CONFIGS[length] || LENGTH_CONFIGS.medium;
     const langPrompt = LANGUAGE_PROMPTS[language] || LANGUAGE_PROMPTS.en;
     const topicFilter = topics?.length ? `\n\nFocus on: ${topics.join(', ')}` : '';
+    const lengthInstruction = length === 'short' ? 'Keep it very brief.' : length === 'detailed' ? 'Provide extensive detail.' : '';
     
-    let fullPrompt = `${config.system} ${langPrompt}${topicFilter}\n\nTranscript:\n\n${transcript.substring(0, 25000)}`;
+    const maxTokens = Math.round(config.maxTokens * lengthConfig.multiplier);
+    let fullPrompt = `${config.system} ${langPrompt} ${lengthInstruction}${topicFilter}\n\nTranscript:\n\n${transcript.substring(0, 25000)}`;
     
     let summary = '';
     let success = false;
@@ -311,7 +323,7 @@ app.post('/api/summarize', async (req, res) => {
           contents: fullPrompt,
           config: {
             temperature: config.temperature,
-            maxOutputTokens: config.maxTokens,
+            maxOutputTokens: maxTokens,
             systemInstruction: config.system,
           }
         });
@@ -337,6 +349,7 @@ app.post('/api/summarize', async (req, res) => {
       videoId,
       summary,
       style,
+      length,
       language,
       model: selectedModel,
       transcriptLength: transcript.length,
@@ -788,7 +801,72 @@ Transcript: ${transcript.substring(0, 15000)}`;
   }
 });
 
-app.get('/api/cache/clear', (req, res) => {
+app.post('/api/title', async (req, res) => {
+  try {
+    const { url } = req.body as { url?: string };
+    
+    if (!url) {
+      return res.status(400).json({ error: 'YouTube URL is required' });
+    }
+
+    const videoIdMatch = url.match(/(?:youtube\.com\/(?:[^\/]+\/.+\/|(?:v|e(?:mbed)?)\/|.*[?&]v=)|youtu\.be\/)([^"&?\/\s]{11})/i);
+    const videoId = videoIdMatch?.[1];
+
+    if (!videoId) {
+      return res.status(400).json({ error: 'Invalid YouTube URL' });
+    }
+
+    let transcript = '';
+    if (process.env.SUPADATA_API_KEY) {
+      try {
+        const transcriptRes = await fetch(
+          `https://api.supadata.ai/v1/youtube/transcript?videoId=${videoId}`,
+          {
+            headers: { 
+              "x-api-key": process.env.SUPADATA_API_KEY,
+              "Content-Type": "application/json"
+            }
+          }
+        );
+        const transcriptData = await transcriptRes.json();
+        if (transcriptData.content) {
+          transcript = transcriptData.content.map((c: any) => c.text).join(' ');
+        }
+      } catch (e: any) {
+        console.warn(`Supadata failed: ${e.message}`);
+      }
+    }
+
+    if (!transcript) {
+      return res.status(400).json({ error: 'Could not fetch transcript' });
+    }
+
+    const prompt = `Generate an engaging, click-worthy title for this video based on the transcript. 
+    Keep it concise (under 60 characters). Make it descriptive and intriguing.
+    
+    Transcript excerpt: ${transcript.substring(0, 5000)}`;
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-2.0-flash',
+      contents: prompt,
+      config: { temperature: 0.8, maxOutputTokens: 100 }
+    });
+
+    const title = response.text?.trim()?.replace(/^["']|["']$/g, '') || 'Video Summary';
+
+    res.json({
+      videoId,
+      title,
+      timestamp: new Date().toISOString(),
+    });
+
+  } catch (error: any) {
+    console.error('Title generation error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/clear', (req, res) => {
   transcriptCache.clear();
   res.json({ message: 'Cache cleared', size: 0 });
 });
