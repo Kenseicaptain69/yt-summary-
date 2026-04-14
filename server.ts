@@ -345,6 +345,8 @@ app.post('/api/summarize', async (req, res) => {
       return res.status(500).json({ error: 'AI summarization failed' });
     }
 
+    const convId = `conv_${videoId}_${Date.now()}`;
+    
     const result = {
       videoId,
       summary,
@@ -354,7 +356,15 @@ app.post('/api/summarize', async (req, res) => {
       model: selectedModel,
       transcriptLength: transcript.length,
       timestamp: new Date().toISOString(),
+      conversationId: convId,
     };
+
+    // Seed conversation history with the summary context
+    conversationHistory.set(convId, [{
+      role: 'assistant',
+      content: `Here is the summary of the video:\n\n${summary}`,
+      timestamp: Date.now(),
+    }]);
 
     cacheSet(cacheKey, result);
     res.json(result);
@@ -866,6 +876,170 @@ app.post('/api/title', async (req, res) => {
   }
 });
 
+// ============================================================
+// NEW: Generate Flashcards from Video
+// ============================================================
+app.post('/api/flashcards', async (req, res) => {
+  try {
+    const { url, count = 8 } = req.body as { url?: string; count?: number };
+    
+    if (!url) {
+      return res.status(400).json({ error: 'YouTube URL is required' });
+    }
+
+    const videoIdMatch = url.match(/(?:youtube\.com\/(?:[^\/]+\/.+\/|(?:v|e(?:mbed)?)\/|.*[?&]v=)|youtu\.be\/)([^"&?\/\s]{11})/i);
+    const videoId = videoIdMatch?.[1];
+
+    if (!videoId) {
+      return res.status(400).json({ error: 'Invalid YouTube URL' });
+    }
+
+    const cacheKey = generateCacheKey(`flashcards:${videoId}:${count}`);
+    const cached = cacheGet(cacheKey);
+    if (cached) {
+      usageStats.cacheHits++;
+      return res.json({ ...cached, cached: true });
+    }
+
+    let transcript = '';
+    if (process.env.SUPADATA_API_KEY) {
+      try {
+        const transcriptRes = await fetch(
+          `https://api.supadata.ai/v1/youtube/transcript?videoId=${videoId}`,
+          {
+            headers: { 
+              "x-api-key": process.env.SUPADATA_API_KEY,
+              "Content-Type": "application/json"
+            }
+          }
+        );
+        const transcriptData = await transcriptRes.json();
+        if (transcriptData.content) {
+          transcript = transcriptData.content.map((c: any) => c.text).join(' ');
+        }
+      } catch (e: any) {
+        console.warn(`Supadata failed: ${e.message}`);
+      }
+    }
+
+    if (!transcript) {
+      return res.status(400).json({ error: 'Could not fetch transcript' });
+    }
+
+    const prompt = `Based on this video transcript, generate exactly ${Math.min(count, 15)} study flashcards.
+
+For each flashcard, provide:
+- A clear, focused question
+- A concise but complete answer
+- A difficulty level (easy, medium, hard)
+
+Format your response ONLY as a valid JSON array like this, with no other text:
+[
+  {"question": "...", "answer": "...", "difficulty": "easy"},
+  {"question": "...", "answer": "...", "difficulty": "medium"}
+]
+
+Transcript: ${transcript.substring(0, 15000)}`;
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-2.0-flash',
+      contents: prompt,
+      config: { temperature: 0.4, maxOutputTokens: 3000 }
+    });
+
+    let flashcards = [];
+    try {
+      const text = response.text || '[]';
+      const jsonMatch = text.match(/\[[\s\S]*\]/);
+      flashcards = jsonMatch ? JSON.parse(jsonMatch[0]) : [];
+    } catch (parseErr) {
+      console.warn('Failed to parse flashcards JSON, attempting line-by-line');
+      flashcards = [{ question: 'Could not generate flashcards', answer: response.text || '', difficulty: 'medium' }];
+    }
+
+    const result = {
+      videoId,
+      flashcards,
+      count: flashcards.length,
+      timestamp: new Date().toISOString(),
+    };
+
+    cacheSet(cacheKey, result);
+    res.json(result);
+
+  } catch (error: any) {
+    console.error('Flashcard generation error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============================================================
+// NEW: Get Raw Transcript for Viewer
+// ============================================================
+app.get('/api/transcript/:videoId', async (req, res) => {
+  try {
+    const { videoId } = req.params;
+    
+    if (!videoId || videoId.length !== 11) {
+      return res.status(400).json({ error: 'Valid video ID required' });
+    }
+
+    const cacheKey = generateCacheKey(`transcript:${videoId}`);
+    const cached = cacheGet(cacheKey);
+    if (cached) {
+      usageStats.cacheHits++;
+      return res.json({ ...cached, cached: true });
+    }
+
+    let segments: { text: string; offset?: number }[] = [];
+    let fullText = '';
+
+    if (process.env.SUPADATA_API_KEY) {
+      try {
+        const transcriptRes = await fetch(
+          `https://api.supadata.ai/v1/youtube/transcript?videoId=${videoId}`,
+          {
+            headers: { 
+              "x-api-key": process.env.SUPADATA_API_KEY,
+              "Content-Type": "application/json"
+            }
+          }
+        );
+        const transcriptData = await transcriptRes.json();
+        if (transcriptData.content) {
+          segments = transcriptData.content.map((c: any) => ({
+            text: c.text,
+            offset: c.offset || 0,
+          }));
+          fullText = segments.map(s => s.text).join(' ');
+        }
+      } catch (e: any) {
+        console.warn(`Supadata failed: ${e.message}`);
+      }
+    }
+
+    if (!fullText) {
+      return res.status(400).json({ error: 'Could not fetch transcript' });
+    }
+
+    const result = {
+      videoId,
+      transcript: fullText,
+      segments,
+      wordCount: fullText.split(/\s+/).length,
+      characterCount: fullText.length,
+      timestamp: new Date().toISOString(),
+    };
+
+    cacheSet(cacheKey, result);
+    res.json(result);
+
+  } catch (error: any) {
+    console.error('Transcript fetch error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 app.get('/api/clear', (req, res) => {
   transcriptCache.clear();
   res.json({ message: 'Cache cleared', size: 0 });
@@ -912,19 +1086,20 @@ async function startServer() {
     app.listen(PORT, '0.0.0.0', () => {
       console.log(`
 ╔═══════════════════════════════════════════════════════════════╗
-║  📺 YouTube Summarizer API v2.0                              ║
+║  📺 YouTube Summarizer API v2.1                              ║
 ║  🚀 Server running on http://localhost:${PORT}                    ║
 ╠═══════════════════════════════════════════════════════════════╣
-║  Endpoints:                                                 ║
-║  POST /api/summarize     - Summarize video (url, style, lang)  ║
-║  POST /api/summarize/stream - Stream summary as it's generated     ║
-║  POST /api/conversation/:id - Multi-turn chat about video       ║
-║  POST /api/batch        - Batch process multiple URLs        ║
-║  POST /api/analyze     - Video content analysis            ║
-║  POST /api/chapters    - Generate chapter markers         ║
-║  GET  /api/search     - Search within video             ║
-║  GET  /api/health    - Health & stats                   ║
-║  GET  /api/stats     - Usage statistics                   ║
+║  Endpoints:                                                   ║
+║  POST /api/summarize          - Summarize video               ║
+║  POST /api/summarize/stream   - Stream summary                ║
+║  POST /api/conversation/:id   - Multi-turn chat               ║
+║  POST /api/batch              - Batch process URLs            ║
+║  POST /api/analyze            - Video content analysis        ║
+║  POST /api/chapters           - Generate chapter markers      ║
+║  POST /api/flashcards         - Generate study flashcards     ║
+║  GET  /api/transcript/:id     - Get raw transcript            ║
+║  GET  /api/search             - Search within video           ║
+║  GET  /api/health             - Health & stats                ║
 ╚═══════════════════════════════════════════════════════════════╝
       `);
     });
