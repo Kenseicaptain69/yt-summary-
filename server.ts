@@ -430,14 +430,13 @@ app.post('/api/summarize/stream', async (req, res) => {
 
     res.write(`data: ${JSON.stringify({ status: 'generating', videoId })}\n\n`);
 
-    const response = await ai.models.generateContent({
+    const response = await ai.models.generateContentStream({
       model: 'gemini-2.0-flash',
       contents: prompt,
       config: {
         temperature: config.temperature,
         maxOutputTokens: config.maxTokens,
       },
-      generateStreamingContent: true,
     });
 
     for await (const chunk of response) {
@@ -1067,6 +1066,448 @@ app.delete('/api/cache/:key', (req, res) => {
   res.json({ deleted, key });
 });
 
+// ============================================================
+// NOTEBOOK HELPER: Fetch transcripts for multiple videos
+// ============================================================
+async function fetchMultipleTranscripts(videoIds: string[]): Promise<Map<string, string>> {
+  const results = new Map<string, string>();
+  if (!process.env.SUPADATA_API_KEY) return results;
+
+  await Promise.allSettled(
+    videoIds.map(async (videoId) => {
+      const cacheKey = generateCacheKey(`transcript:${videoId}`);
+      const cached = cacheGet(cacheKey);
+      if (cached?.transcript) {
+        results.set(videoId, cached.transcript);
+        return;
+      }
+      try {
+        const res = await fetch(
+          `https://api.supadata.ai/v1/youtube/transcript?videoId=${videoId}`,
+          { headers: { 'x-api-key': process.env.SUPADATA_API_KEY!, 'Content-Type': 'application/json' } }
+        );
+        const data = await res.json();
+        if (data.content) {
+          const text = data.content.map((c: any) => c.text).join(' ');
+          results.set(videoId, text);
+        }
+      } catch (e: any) {
+        console.warn(`Transcript fetch failed for ${videoId}: ${e.message}`);
+      }
+    })
+  );
+  return results;
+}
+
+// ============================================================
+// NOTEBOOK: Generate Study Guide from multiple sources
+// ============================================================
+app.post('/api/notebook/study-guide', async (req, res) => {
+  try {
+    const { videoIds, language = 'en' } = req.body as { videoIds?: string[]; language?: string };
+    if (!videoIds?.length) return res.status(400).json({ error: 'videoIds array required' });
+
+    const transcripts = await fetchMultipleTranscripts(videoIds);
+    if (transcripts.size === 0) return res.status(400).json({ error: 'Could not fetch any transcripts' });
+
+    const combined = Array.from(transcripts.entries())
+      .map(([id, t]) => `[Video ${id}]:\n${t.substring(0, 8000)}`)
+      .join('\n\n---\n\n');
+
+    const langInstruction = language !== 'en' ? `Respond in ${language} language.` : '';
+
+    const prompt = `You are an expert educator. Create a comprehensive study guide from these video transcripts. ${langInstruction}
+
+Structure the guide as:
+# Study Guide
+## Overview (2-3 sentence introduction)
+## Key Concepts (numbered list with explanations)
+## Important Details (bullet points of crucial information)
+## Connections Between Topics (how concepts relate)
+## Summary (concise wrap-up)
+## Review Questions (5 questions to test understanding)
+
+Transcripts:
+${combined}`;
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-2.0-flash',
+      contents: prompt,
+      config: { temperature: 0.5, maxOutputTokens: 4000 }
+    });
+
+    res.json({
+      studyGuide: response.text || '',
+      sourceCount: transcripts.size,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (error: any) {
+    console.error('Study guide error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============================================================
+// NOTEBOOK: Generate Mind Map (Mermaid syntax)
+// ============================================================
+app.post('/api/notebook/mind-map', async (req, res) => {
+  try {
+    const { videoIds, language = 'en' } = req.body as { videoIds?: string[]; language?: string };
+    if (!videoIds?.length) return res.status(400).json({ error: 'videoIds array required' });
+
+    const transcripts = await fetchMultipleTranscripts(videoIds);
+    if (transcripts.size === 0) return res.status(400).json({ error: 'Could not fetch any transcripts' });
+
+    const combined = Array.from(transcripts.values()).map(t => t.substring(0, 6000)).join('\n\n');
+    const langInstruction = language !== 'en' ? `Use ${language} language for all labels.` : '';
+
+    const prompt = `Analyze these video transcripts and generate a mind map in Mermaid.js mindmap syntax. ${langInstruction}
+
+Rules:
+- Use the "mindmap" diagram type
+- Create a central topic node
+- Add 4-6 main branches
+- Each branch should have 2-4 sub-topics
+- Keep labels short (2-5 words)
+- Do NOT use special characters in labels (no parentheses, brackets, quotes)
+- Output ONLY the mermaid code block, nothing else
+
+Example format:
+mindmap
+  root((Main Topic))
+    Branch One
+      Sub topic A
+      Sub topic B
+    Branch Two
+      Sub topic C
+
+Transcripts:
+${combined}`;
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-2.0-flash',
+      contents: prompt,
+      config: { temperature: 0.4, maxOutputTokens: 1500 }
+    });
+
+    let mermaidCode = response.text || '';
+    const match = mermaidCode.match(/```(?:mermaid)?\s*([\s\S]*?)```/);
+    if (match) mermaidCode = match[1].trim();
+    if (!mermaidCode.startsWith('mindmap')) mermaidCode = 'mindmap\n  root((Topics))\n    No data available';
+
+    res.json({
+      mindMap: mermaidCode,
+      sourceCount: transcripts.size,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (error: any) {
+    console.error('Mind map error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============================================================
+// NOTEBOOK: Generate Quiz with scoring
+// ============================================================
+app.post('/api/notebook/quiz', async (req, res) => {
+  try {
+    const { videoIds, difficulty = 'mixed', count = 10, language = 'en' } = req.body as {
+      videoIds?: string[]; difficulty?: string; count?: number; language?: string;
+    };
+    if (!videoIds?.length) return res.status(400).json({ error: 'videoIds array required' });
+
+    const transcripts = await fetchMultipleTranscripts(videoIds);
+    if (transcripts.size === 0) return res.status(400).json({ error: 'Could not fetch any transcripts' });
+
+    const combined = Array.from(transcripts.values()).map(t => t.substring(0, 8000)).join('\n\n');
+    const langInstruction = language !== 'en' ? `Write all questions and answers in ${language} language.` : '';
+    const diffInstruction = difficulty === 'mixed' ? 'Mix easy, medium, and hard questions.' : `Make all questions ${difficulty} difficulty.`;
+
+    const prompt = `Generate exactly ${Math.min(count, 20)} quiz questions from these video transcripts. ${langInstruction} ${diffInstruction}
+
+Format as a valid JSON array ONLY (no other text):
+[
+  {
+    "type": "multiple_choice",
+    "question": "Question text?",
+    "options": ["A) ...", "B) ...", "C) ...", "D) ..."],
+    "correctAnswer": 0,
+    "explanation": "Why this is correct",
+    "difficulty": "easy"
+  },
+  {
+    "type": "true_false",
+    "question": "Statement to evaluate",
+    "correctAnswer": true,
+    "explanation": "Why true/false",
+    "difficulty": "medium"
+  }
+]
+
+Mix multiple_choice and true_false types. Make ~70% multiple choice and ~30% true/false.
+
+Transcripts:
+${combined}`;
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-2.0-flash',
+      contents: prompt,
+      config: { temperature: 0.5, maxOutputTokens: 5000 }
+    });
+
+    let quiz: any[] = [];
+    try {
+      const text = response.text || '[]';
+      const jsonMatch = text.match(/\[[\s\S]*\]/);
+      quiz = jsonMatch ? JSON.parse(jsonMatch[0]) : [];
+    } catch {
+      quiz = [{ type: 'multiple_choice', question: 'Quiz generation failed', options: ['N/A'], correctAnswer: 0, explanation: '', difficulty: 'easy' }];
+    }
+
+    res.json({
+      quiz,
+      count: quiz.length,
+      difficulty,
+      sourceCount: transcripts.size,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (error: any) {
+    console.error('Quiz error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============================================================
+// NOTEBOOK: Extract Key Concepts
+// ============================================================
+app.post('/api/notebook/concepts', async (req, res) => {
+  try {
+    const { videoIds, language = 'en' } = req.body as { videoIds?: string[]; language?: string };
+    if (!videoIds?.length) return res.status(400).json({ error: 'videoIds array required' });
+
+    const transcripts = await fetchMultipleTranscripts(videoIds);
+    if (transcripts.size === 0) return res.status(400).json({ error: 'Could not fetch any transcripts' });
+
+    const combined = Array.from(transcripts.values()).map(t => t.substring(0, 8000)).join('\n\n');
+    const langInstruction = language !== 'en' ? `Respond in ${language} language.` : '';
+
+    const prompt = `Extract key concepts from these video transcripts. ${langInstruction}
+
+Return ONLY a valid JSON array:
+[
+  {
+    "term": "Concept Name",
+    "definition": "Clear 1-2 sentence definition",
+    "category": "Category name",
+    "importance": "high"
+  }
+]
+
+importance can be: "high", "medium", or "low"
+Extract 10-15 concepts, ordered by importance.
+
+Transcripts:
+${combined}`;
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-2.0-flash',
+      contents: prompt,
+      config: { temperature: 0.3, maxOutputTokens: 3000 }
+    });
+
+    let concepts: any[] = [];
+    try {
+      const text = response.text || '[]';
+      const jsonMatch = text.match(/\[[\s\S]*\]/);
+      concepts = jsonMatch ? JSON.parse(jsonMatch[0]) : [];
+    } catch {
+      concepts = [];
+    }
+
+    res.json({
+      concepts,
+      count: concepts.length,
+      sourceCount: transcripts.size,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (error: any) {
+    console.error('Concepts error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============================================================
+// NOTEBOOK: Generate AI Audio Script (Podcast-style)
+// ============================================================
+app.post('/api/notebook/audio-script', async (req, res) => {
+  try {
+    const { videoIds, language = 'en' } = req.body as { videoIds?: string[]; language?: string };
+    if (!videoIds?.length) return res.status(400).json({ error: 'videoIds array required' });
+
+    const transcripts = await fetchMultipleTranscripts(videoIds);
+    if (transcripts.size === 0) return res.status(400).json({ error: 'Could not fetch any transcripts' });
+
+    const combined = Array.from(transcripts.values()).map(t => t.substring(0, 6000)).join('\n\n');
+    const langInstruction = language !== 'en' ? `Write the entire conversation in ${language} language.` : '';
+
+    const prompt = `Create an engaging podcast-style conversation between two hosts discussing the content from these video transcripts. ${langInstruction}
+
+Host A is "Alex" - enthusiastic and asks great questions.
+Host B is "Sam" - knowledgeable and gives insightful answers.
+
+Rules:
+- Write 8-12 exchanges (back and forth)
+- Make it conversational and natural
+- Cover the key points from the videos
+- Add some humor and personality
+- Format each line as: "Alex: ..." or "Sam: ..."
+- Start with an introduction and end with a wrap-up
+- Each response should be 2-4 sentences max
+
+Transcripts:
+${combined}`;
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-2.0-flash',
+      contents: prompt,
+      config: { temperature: 0.8, maxOutputTokens: 3000 }
+    });
+
+    const scriptText = response.text || '';
+    const lines = scriptText.split('\n').filter(l => l.trim());
+    const segments = lines.map(line => {
+      const alexMatch = line.match(/^(?:\*\*)?Alex(?:\*\*)?:\s*(.*)/i);
+      const samMatch = line.match(/^(?:\*\*)?Sam(?:\*\*)?:\s*(.*)/i);
+      if (alexMatch) return { speaker: 'Alex', text: alexMatch[1].trim() };
+      if (samMatch) return { speaker: 'Sam', text: samMatch[1].trim() };
+      return null;
+    }).filter(Boolean);
+
+    res.json({
+      script: scriptText,
+      segments,
+      sourceCount: transcripts.size,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (error: any) {
+    console.error('Audio script error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============================================================
+// NOTEBOOK: Generate Briefing Document
+// ============================================================
+app.post('/api/notebook/briefing', async (req, res) => {
+  try {
+    const { videoIds, language = 'en' } = req.body as { videoIds?: string[]; language?: string };
+    if (!videoIds?.length) return res.status(400).json({ error: 'videoIds array required' });
+
+    const transcripts = await fetchMultipleTranscripts(videoIds);
+    if (transcripts.size === 0) return res.status(400).json({ error: 'Could not fetch any transcripts' });
+
+    const combined = Array.from(transcripts.entries())
+      .map(([id, t]) => `[Source: ${id}]:\n${t.substring(0, 6000)}`)
+      .join('\n\n---\n\n');
+    const langInstruction = language !== 'en' ? `Write the entire briefing in ${language} language.` : '';
+
+    const prompt = `Create a professional briefing document from these video transcripts. ${langInstruction}
+
+Format:
+# Briefing Document
+**Date:** ${new Date().toLocaleDateString()}
+**Sources:** ${transcripts.size} video(s)
+
+## Executive Summary
+(3-4 sentence overview)
+
+## Key Findings
+(Numbered list of 5-8 key findings)
+
+## Detailed Analysis
+(2-3 paragraphs covering major themes)
+
+## Action Items
+(Bullet list of recommended next steps)
+
+## Conclusion
+(Brief closing statement)
+
+Transcripts:
+${combined}`;
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-2.0-flash',
+      contents: prompt,
+      config: { temperature: 0.5, maxOutputTokens: 4000 }
+    });
+
+    res.json({
+      briefing: response.text || '',
+      sourceCount: transcripts.size,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (error: any) {
+    console.error('Briefing error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============================================================
+// NOTEBOOK: Multi-source Chat
+// ============================================================
+app.post('/api/notebook/chat', async (req, res) => {
+  try {
+    const { videoIds, message, conversationId, language = 'en' } = req.body as {
+      videoIds?: string[]; message?: string; conversationId?: string; language?: string;
+    };
+    if (!videoIds?.length) return res.status(400).json({ error: 'videoIds array required' });
+    if (!message) return res.status(400).json({ error: 'message required' });
+
+    const transcripts = await fetchMultipleTranscripts(videoIds);
+    if (transcripts.size === 0) return res.status(400).json({ error: 'Could not fetch any transcripts' });
+
+    const convId = conversationId || `nb_${Date.now()}`;
+    let history = conversationHistory.get(convId) || [];
+    const now = Date.now();
+    history = history.filter(h => now - h.timestamp < CONVERSATION_TTL);
+    history.push({ role: 'user', content: message, timestamp: now });
+
+    const combined = Array.from(transcripts.values()).map(t => t.substring(0, 5000)).join('\n\n');
+    const langInstruction = language !== 'en' ? `Respond in ${language} language.` : '';
+    const context = history.slice(-CONVERSATION_MAX_TURNS).map(h => `${h.role}: ${h.content}`).join('\n');
+
+    const prompt = `You are an AI assistant with knowledge of these video transcripts. Answer the user's question based on the content. ${langInstruction}
+
+Video Content:
+${combined.substring(0, 15000)}
+
+Conversation:
+${context}
+
+assistant:`;
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-2.0-flash',
+      contents: prompt,
+      config: { temperature: 0.7, maxOutputTokens: 1500 }
+    });
+
+    const answer = response.text || '';
+    history.push({ role: 'assistant', content: answer, timestamp: Date.now() });
+    conversationHistory.set(convId, history.slice(-CONVERSATION_MAX_TURNS));
+
+    res.json({
+      conversationId: convId,
+      message: answer,
+      sourceCount: transcripts.size,
+    });
+  } catch (error: any) {
+    console.error('Notebook chat error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 async function startServer() {
   try {
     if (NODE_ENV !== 'production') {
@@ -1086,20 +1527,24 @@ async function startServer() {
     app.listen(PORT, '0.0.0.0', () => {
       console.log(`
 ╔═══════════════════════════════════════════════════════════════╗
-║  📺 YouTube Summarizer API v2.1                              ║
+║  📺 SummifyYT API v3.0 — AI Video Learning Lab               ║
 ║  🚀 Server running on http://localhost:${PORT}                    ║
 ╠═══════════════════════════════════════════════════════════════╣
-║  Endpoints:                                                   ║
+║  Core Endpoints:                                              ║
 ║  POST /api/summarize          - Summarize video               ║
-║  POST /api/summarize/stream   - Stream summary                ║
 ║  POST /api/conversation/:id   - Multi-turn chat               ║
-║  POST /api/batch              - Batch process URLs            ║
 ║  POST /api/analyze            - Video content analysis        ║
-║  POST /api/chapters           - Generate chapter markers      ║
 ║  POST /api/flashcards         - Generate study flashcards     ║
 ║  GET  /api/transcript/:id     - Get raw transcript            ║
-║  GET  /api/search             - Search within video           ║
-║  GET  /api/health             - Health & stats                ║
+╠═══════════════════════════════════════════════════════════════╣
+║  Notebook Endpoints:                                          ║
+║  POST /api/notebook/study-guide  - Study guide generation     ║
+║  POST /api/notebook/audio-script - AI podcast script          ║
+║  POST /api/notebook/mind-map     - Mind map (Mermaid)         ║
+║  POST /api/notebook/quiz         - Quiz with scoring          ║
+║  POST /api/notebook/concepts     - Key concept extraction     ║
+║  POST /api/notebook/briefing     - Briefing document          ║
+║  POST /api/notebook/chat         - Multi-source chat          ║
 ╚═══════════════════════════════════════════════════════════════╝
       `);
     });

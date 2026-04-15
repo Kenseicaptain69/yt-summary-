@@ -1,4 +1,6 @@
-import type { VercelRequest, VercelResponse } from '@vercel/node';
+// Using inline types to avoid @vercel/node dependency
+type VercelRequest = any;
+type VercelResponse = any;
 
 // Local extractive summarizer (no API needed)
 function extractiveSummarize(text: string, maxSentences = 5): string {
@@ -81,6 +83,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       // === APPROACH 2: Transcript + Gemini text ===
       if (!summary) {
         try {
+          // @ts-ignore - Dynamic import
           const { YoutubeTranscript } = await import('youtube-transcript/dist/youtube-transcript.esm.js');
           try {
             const items = await YoutubeTranscript.fetchTranscript(videoId);
@@ -110,6 +113,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     if (!summary) {
       if (!transcript) {
         try {
+          // @ts-ignore - Dynamic import
           const { YoutubeTranscript } = await import('youtube-transcript/dist/youtube-transcript.esm.js');
           const items = await YoutubeTranscript.fetchTranscript(videoId);
           transcript = items.map((t: any) => t.text).join(' ');

@@ -323,3 +323,76 @@ body {
   50% { transform: translate(-5px, -25px) scale(1); }
   75% { transform: translate(-15px, -10px) scale(0.95); }
 }
+
+/* ===== Spin Animation ===== */
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+/* ===== Responsive Layout ===== */
+@media (max-width: 900px) {
+  .notebook-grid {
+    grid-template-columns: 1fr !important;
+  }
+}
+
+@media (max-width: 768px) {
+  .feature-grid {
+    grid-template-columns: 1fr !important;
+  }
+}
+
+/* ===== Notebook Source Card ===== */
+.source-card {
+  transition: transform 0.2s, border-color 0.2s;
+}
+.source-card:hover {
+  transform: translateY(-1px);
+  border-color: var(--glass-border-hover);
+}
+
+/* ===== Audio Waveform ===== */
+@keyframes waveform-bar {
+  0%, 100% { height: 4px; }
+  50% { height: 24px; }
+}
+
+/* ===== Quiz Timer Gradient ===== */
+.quiz-timer-bar {
+  transition: width 0.5s linear;
+}
+
+/* ===== Language Dropdown ===== */
+.lang-picker-item {
+  transition: background 0.15s, color 0.15s;
+}
+.lang-picker-item:hover {
+  background: rgba(255, 255, 255, 0.06) !important;
+  color: var(--text-primary) !important;
+}
+
+/* ===== Mind Map Container ===== */
+.mindmap-container svg {
+  max-width: 100%;
+  height: auto;
+}
+.mindmap-container .node rect,
+.mindmap-container .node circle,
+.mindmap-container .node polygon {
+  fill: rgba(168, 85, 247, 0.15) !important;
+  stroke: rgba(168, 85, 247, 0.4) !important;
+}
+.mindmap-container .edgePath path {
+  stroke: rgba(255, 255, 255, 0.2) !important;
+}
+
+/* ===== Concept Card ===== */
+.concept-card {
+  transition: transform 0.2s, box-shadow 0.2s;
+}
+.concept-card:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2);
+}
+
