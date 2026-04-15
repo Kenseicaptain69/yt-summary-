@@ -26,7 +26,7 @@ function extractVideoId(url) {
 }
 
 // POST /summarize — body: { url: "https://youtube.com/watch?v=..." }
-app.post("/summarize", async (req, res) => {
+app.post("/api/summarize", async (req, res) => {
   try {
     const { url } = req.body;
     if (!url) return res.status(400).json({ error: "url is required" });
